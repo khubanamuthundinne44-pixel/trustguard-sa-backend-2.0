@@ -15,10 +15,6 @@ from collections import defaultdict
 app = Flask(__name__)
 
 # -- Environment Variables (set these on Render) --
-# TWILIO_ACCOUNT_SID  -> from twilio.com/console
-# TWILIO_AUTH_TOKEN   -> from twilio.com/console
-# HF_TOKEN            -> from huggingface.co/settings/tokens
-
 TWILIO_ACCOUNT_SID = os.environ.get('TWILIO_ACCOUNT_SID')
 TWILIO_AUTH_TOKEN  = os.environ.get('TWILIO_AUTH_TOKEN')
 HF_TOKEN           = os.environ.get('HF_TOKEN')
@@ -62,16 +58,34 @@ def left_today(phone: str) -> int:
 
 # -- Hugging Face Inference --
 def hf_query(model_url: str, data: bytes):
+    """Send file to HF model. Handles cold-start by waiting for model to load."""
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    for attempt in range(3):
+
+    # First request -- may return 503 if model is cold
+    try:
+        r = requests.post(model_url, headers=headers, data=data, timeout=60)
+    except requests.RequestException:
+        return None
+
+    # If model is loading, wait and retry
+    if r.status_code == 503:
         try:
-            r = requests.post(model_url, headers=headers, data=data, timeout=25)
-            if r.status_code == 200:
-                return r.json()
-            if r.status_code == 503:
-                time.sleep(8)
+            estimated = r.json().get("estimated_time", 30)
+        except Exception:
+            estimated = 30
+        wait_time = min(int(estimated) + 5, 90)
+        time.sleep(wait_time)
+        try:
+            r = requests.post(model_url, headers=headers, data=data, timeout=60)
         except requests.RequestException:
-            time.sleep(3)
+            return None
+
+    if r.status_code == 200:
+        try:
+            return r.json()
+        except Exception:
+            return None
+
     return None
 
 def top_result(results):
@@ -95,52 +109,57 @@ def fetch_media(url: str) -> bytes:
 
 # -- Message Templates --
 WELCOME = (
-    "👋 *Welcome to TrustGuard SA!*\n"
-    "South Africa's #1 AI scam detection service \U0001f6e1️\n\n"
+    "\U0001f44b *Welcome to TrustGuard SA!*\n"
+    "South Africa's #1 AI scam detection service \U0001f6e1\ufe0f\n\n"
     "Here's what I can do for you:\n"
-    "📸 Send me an *image* \u2014 I'll check if it's a deepfake\n"
-    "🎵 Send me a *voice note* \u2014 I'll check if it's AI generated\n\n"
-    "🔜 *Coming soon:*\n"
-    "✨ Video detection\n"
-    "✨ Document verification\n"
-    "✨ Live scam call alerts\n\n"
-    "Send me anything suspicious! \U0001f6e1️"
+    "\U0001f4f8 Send me an *image* \u2014 I'll check if it's a deepfake\n"
+    "\U0001f3b5 Send me a *voice note* \u2014 I'll check if it's AI generated\n\n"
+    "\U0001f51c *Coming soon:*\n"
+    "\u2728 Video detection\n"
+    "\u2728 Document verification\n"
+    "\u2728 Live scam call alerts\n\n"
+    "Send me anything suspicious! \U0001f6e1\ufe0f"
 )
 
 UNKNOWN = (
-    "🛡️ I'm TrustGuard SA \u2014 I only detect deepfakes and AI voices.\n"
-    "Send me an *image* 📸 or *voice note* 🎵 to get started!"
+    "\U0001f6e1\ufe0f I'm TrustGuard SA \u2014 I only detect deepfakes and AI voices.\n"
+    "Send me an *image* \U0001f4f8 or *voice note* \U0001f3b5 to get started!"
 )
 
 LIMIT_MSG = (
-    "⚠️ You've used all *3 daily detections*.\n"
+    "\u26a0\ufe0f You've used all *3 daily detections*.\n"
     "Come back tomorrow for more protection!\n\n"
-    "🔜 *Premium plan coming soon* for unlimited access."
+    "\U0001f51c *Premium plan coming soon* for unlimited access."
 )
 
 ERROR_MSG = (
-    "⚠️ Something went wrong during analysis.\n"
+    "\u26a0\ufe0f Something went wrong during analysis.\n"
     "Please try again in a moment."
+)
+
+MODEL_DOWN_MSG = (
+    "\u26a0\ufe0f The AI model is currently overloaded.\n"
+    "Please try again in 30 seconds."
 )
 
 def closing(left: int) -> str:
     return (
-        f"Protect yourself and your family always! \U0001f6e1️\n\n"
+        f"Protect yourself and your family always! \U0001f6e1\ufe0f\n\n"
         f"You have *{left} detection(s)* left for today.\n\n"
-        "📸 Send an image or 🎵 voice note anytime you feel suspicious.\n\n"
-        "🔜 *More features coming soon!*"
+        "\U0001f4f8 Send an image or \U0001f3b5 voice note anytime you feel suspicious.\n\n"
+        "\U0001f51c *More features coming soon!*"
     )
 
 def image_reply(label: str, conf: float, left: int) -> str:
     if is_fake(label):
         verdict = (
-            "⚠️ *Deepfake Detected!*\n"
+            "\u26a0\ufe0f *Deepfake Detected!*\n"
             f"This image appears to be AI generated \u2014 *{conf}% confidence*\n"
-            "🚨 Do not trust this image!"
+            "\U0001f6a8 Do not trust this image!"
         )
     else:
         verdict = (
-            "✅ *Image Looks Real*\n"
+            "\u2705 *Image Looks Real*\n"
             f"This image appears to be genuine \u2014 *{conf}% confidence*"
         )
     return f"{verdict}\n\n{closing(left)}"
@@ -148,13 +167,13 @@ def image_reply(label: str, conf: float, left: int) -> str:
 def voice_reply(label: str, conf: float, left: int) -> str:
     if is_fake(label):
         verdict = (
-            "⚠️ *AI Voice Detected!*\n"
+            "\u26a0\ufe0f *AI Voice Detected!*\n"
             f"This voice note appears to be AI generated \u2014 *{conf}% confidence*\n"
-            "🚨 Do not trust this voice!"
+            "\U0001f6a8 Do not trust this voice!"
         )
     else:
         verdict = (
-            "✅ *Voice Sounds Real*\n"
+            "\u2705 *Voice Sounds Real*\n"
             f"This voice note appears to be genuine \u2014 *{conf}% confidence*"
         )
     return f"{verdict}\n\n{closing(left)}"
@@ -186,9 +205,12 @@ def webhook():
                 reply = ERROR_MSG
             else:
                 use_one(sender)
-                results     = hf_query(IMAGE_MODEL, data)
-                label, conf = top_result(results)
-                reply       = image_reply(label, conf, left_today(sender)) if label else ERROR_MSG
+                results = hf_query(IMAGE_MODEL, data)
+                if results is None:
+                    reply = MODEL_DOWN_MSG
+                else:
+                    label, conf = top_result(results)
+                    reply = image_reply(label, conf, left_today(sender)) if label else ERROR_MSG
 
         elif content_type.startswith('audio/'):
             try:
@@ -197,9 +219,12 @@ def webhook():
                 reply = ERROR_MSG
             else:
                 use_one(sender)
-                results     = hf_query(VOICE_MODEL, data)
-                label, conf = top_result(results)
-                reply       = voice_reply(label, conf, left_today(sender)) if label else ERROR_MSG
+                results = hf_query(VOICE_MODEL, data)
+                if results is None:
+                    reply = MODEL_DOWN_MSG
+                else:
+                    label, conf = top_result(results)
+                    reply = voice_reply(label, conf, left_today(sender)) if label else ERROR_MSG
 
         else:
             reply = UNKNOWN
@@ -217,7 +242,7 @@ def webhook():
 # -- Health Check --
 @app.route('/', methods=['GET'])
 def home():
-    return "🛡️ TrustGuard SA Backend is live!", 200
+    return "\U0001f6e1\ufe0f TrustGuard SA Backend is live!", 200
 
 # -- Run --
 if __name__ == '__main__':
