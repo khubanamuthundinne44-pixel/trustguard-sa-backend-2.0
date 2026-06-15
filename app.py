@@ -113,73 +113,78 @@ def is_fake(label: str) -> bool:
 # ── Download Media from Twilio ────────────────────────────────────
 def fetch_media(url: str) -> bytes:
     """Download media file sent via WhatsApp (requires Twilio auth)."""
+    print(f"[MEDIA] Downloading: {url}")
+    print(f"[MEDIA] SID set: {'Yes' if TWILIO_ACCOUNT_SID else 'NO SID!'}")
+    print(f"[MEDIA] Token set: {'Yes' if TWILIO_AUTH_TOKEN else 'NO TOKEN!'}")
     r = requests.get(url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), timeout=30)
+    print(f"[MEDIA] Status: {r.status_code}")
     r.raise_for_status()
+    print(f"[MEDIA] Success! Got {len(r.content)} bytes")
     return r.content
 
 # ── Message Templates ─────────────────────────────────────────────
 WELCOME = (
-    "\U0001f44b *Welcome to TrustGuard SA!*\n"
-    "South Africa's #1 AI scam detection service \U0001f6e1\ufe0f\n\n"
+    "👋 *Welcome to TrustGuard SA!*\n"
+    "South Africa's #1 AI scam detection service 🛡️\n\n"
     "Here's what I can do for you:\n"
-    "\U0001f4f8 Send me an *image* \u2014 I'll check if it's a deepfake\n"
-    "\U0001f3b5 Send me a *voice note* \u2014 I'll check if it's AI generated\n\n"
-    "\U0001f51c *Coming soon:*\n"
-    "\u2728 Video detection\n"
-    "\u2728 Document verification\n"
-    "\u2728 Live scam call alerts\n\n"
-    "Send me anything suspicious! \U0001f6e1\ufe0f"
+    "📸 Send me an *image* — I'll check if it's a deepfake\n"
+    "🎵 Send me a *voice note* — I'll check if it's AI generated\n\n"
+    "🔜 *Coming soon:*\n"
+    "✨ Video detection\n"
+    "✨ Document verification\n"
+    "✨ Live scam call alerts\n\n"
+    "Send me anything suspicious! 🛡️"
 )
 
 UNKNOWN = (
-    "\U0001f6e1\ufe0f I'm TrustGuard SA \u2014 I only detect deepfakes and AI voices.\n"
-    "Send me an *image* \U0001f4f8 or *voice note* \U0001f3b5 to get started!"
+    "🛡️ I'm TrustGuard SA — I only detect deepfakes and AI voices.\n"
+    "Send me an *image* 📸 or *voice note* 🎵 to get started!"
 )
 
 LIMIT_MSG = (
-    "\u26a0\ufe0f You've used all *3 daily detections*.\n"
+    "⚠️ You've used all *3 daily detections*.\n"
     "Come back tomorrow for more protection!\n\n"
-    "\U0001f51c *Premium plan coming soon* for unlimited access."
+    "🔜 *Premium plan coming soon* for unlimited access."
 )
 
 ERROR_MSG = (
-    "\u26a0\ufe0f Something went wrong during analysis.\n"
+    "⚠️ Something went wrong during analysis.\n"
     "Please try again in a moment."
 )
 
 def closing(left: int) -> str:
     return (
-        f"Protect yourself and your family always! \U0001f6e1\ufe0f\n\n"
+        f"Protect yourself and your family always! 🛡️\n\n"
         f"You have *{left} detection(s)* left for today.\n\n"
-        "\U0001f4f8 Send an image or \U0001f3b5 voice note anytime you feel suspicious.\n\n"
-        "\U0001f51c *More features coming soon!*"
+        "📸 Send an image or 🎵 voice note anytime you feel suspicious.\n\n"
+        "🔜 *More features coming soon!*"
     )
 
 def image_reply(label: str, conf: float, left: int) -> str:
     if is_fake(label):
         verdict = (
-            "\u26a0\ufe0f *Deepfake Detected!*\n"
-            f"This image appears to be AI generated \u2014 *{conf}% confidence*\n"
-            "\U0001f6a8 Do not trust this image!"
+            "⚠️ *Deepfake Detected!*\n"
+            f"This image appears to be AI generated — *{conf}% confidence*\n"
+            "🚨 Do not trust this image!"
         )
     else:
         verdict = (
-            "\u2705 *Image Looks Real*\n"
-            f"This image appears to be genuine \u2014 *{conf}% confidence*"
+            "✅ *Image Looks Real*\n"
+            f"This image appears to be genuine — *{conf}% confidence*"
         )
     return f"{verdict}\n\n{closing(left)}"
 
 def voice_reply(label: str, conf: float, left: int) -> str:
     if is_fake(label):
         verdict = (
-            "\u26a0\ufe0f *AI Voice Detected!*\n"
-            f"This voice note appears to be AI generated \u2014 *{conf}% confidence*\n"
-            "\U0001f6a8 Do not trust this voice!"
+            "⚠️ *AI Voice Detected!*\n"
+            f"This voice note appears to be AI generated — *{conf}% confidence*\n"
+            "🚨 Do not trust this voice!"
         )
     else:
         verdict = (
-            "\u2705 *Voice Sounds Real*\n"
-            f"This voice note appears to be genuine \u2014 *{conf}% confidence*"
+            "✅ *Voice Sounds Real*\n"
+            f"This voice note appears to be genuine — *{conf}% confidence*"
         )
     return f"{verdict}\n\n{closing(left)}"
 
@@ -192,12 +197,12 @@ def webhook():
 
     reply = UNKNOWN  # default fallback
 
-    # ── First-time user \u2212 show welcome \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    # ── First-time user → show welcome ────────────────────────────
     if sender not in seen_users:
         seen_users.add(sender)
         reply = WELCOME
 
-    # ── Media sent (image or voice note) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    # ── Media sent (image or voice note) ──────────────────────────
     elif num_media > 0:
         media_url    = request.form.get('MediaUrl0', '')
         content_type = request.form.get('MediaContentType0', '')
@@ -208,7 +213,8 @@ def webhook():
         elif content_type.startswith('image/'):
             try:
                 data = fetch_media(media_url)
-            except Exception:
+            except Exception as e:
+                print(f"[ERROR] Image download failed: {e}")
                 reply = ERROR_MSG
             else:
                 use_one(sender)
@@ -219,7 +225,8 @@ def webhook():
         elif content_type.startswith('audio/'):
             try:
                 data = fetch_media(media_url)
-            except Exception:
+            except Exception as e:
+                print(f"[ERROR] Audio download failed: {e}")
                 reply = ERROR_MSG
             else:
                 use_one(sender)
@@ -231,11 +238,11 @@ def webhook():
             # Video or unsupported file
             reply = UNKNOWN
 
-    # ── Greeting text \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    # ── Greeting text ──────────────────────────────────────────────
     elif body in GREETINGS or any(g in body for g in GREETINGS):
         reply = WELCOME
 
-    # ── Anything else (thank you, questions, arguments, etc.) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    # ── Anything else (thank you, questions, arguments, etc.) ──────
     else:
         reply = UNKNOWN
 
@@ -246,7 +253,7 @@ def webhook():
 # ── Health Check ──────────────────────────────────────────────────
 @app.route('/', methods=['GET'])
 def home():
-    return "\U0001f6e1\ufe0f TrustGuard SA Backend is live!", 200
+    return "🛡️ TrustGuard SA Backend is live!", 200
 
 # ── Run ───────────────────────────────────────────────────────────
 if __name__ == '__main__':
