@@ -7,6 +7,7 @@ Platform: Flask + Render + Twilio + Hugging Face
 import os
 import sys
 import time
+import json
 import requests
 import threading
 import signal
@@ -22,7 +23,7 @@ app = Flask(__name__)
 TWILIO_ACCOUNT_SID = os.environ.get('TWILIO_ACCOUNT_SID')
 TWILIO_AUTH_TOKEN  = os.environ.get('TWILIO_AUTH_TOKEN')
 HF_TOKEN           = os.environ.get('HF_TOKEN')
-TWILIO_PHONE       = os.environ.get('TWILIO_PHONE', '+15556403201')
+TWILIO_PHONE       = os.environ.get('TWILIO_PHONE', '+155****3201')
 
 # ── Hugging Face AI Models ────────────────────────────────────────
 IMAGE_MODEL = "https://api-inference.huggingface.co/models/dima806/deepfake_vs_real_image_detection"
@@ -41,6 +42,24 @@ GREETINGS = {
 # ── In-Memory State ───────────────────────────────────────────────
 usage_tracker = defaultdict(lambda: {'count': 0, 'date': None})
 seen_users    = set()
+
+# ── Debug Store (for troubleshooting without Render logs) ─────────
+debug_logs = []          # list of dicts with debug info
+debug_lock = threading.Lock()
+
+def add_debug(entry):
+    """Store debug entry with timestamp. Keep last 50 entries."""
+    entry['ts'] = time.strftime('%Y-%m-%d %H:%M:%S')
+    with debug_lock:
+        debug_logs.append(entry)
+        if len(debug_logs) > 50:
+            debug_logs.pop(0)
+    # Also write to file for persistence across restarts
+    try:
+        with open('/tmp/trustguard_debug.json', 'a') as f:
+            f.write(json.dumps(entry) + '\n')
+    except:
+        pass
 
 # ── Thread tracking (prevent garbage collection) ──────────────────
 active_threads = {}
@@ -72,32 +91,30 @@ def left_today(phone):
 # ── HF Inference ──────────────────────────────────────────────────
 def hf_query(model_url, data):
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    print(f"[HF] Query: {model_url}")
-    sys.stdout.flush()
+    add_debug({"event": "hf_start", "model": model_url})
 
     for attempt in range(10):
         try:
-            print(f"[HF] Attempt {attempt+1}/10...")
-            sys.stdout.flush()
             r = requests.post(model_url, headers=headers, data=data, timeout=120)
-            print(f"[HF] Status: {r.status_code} | {r.text[:200]}")
-            sys.stdout.flush()
+            add_debug({
+                "event": "hf_attempt",
+                "attempt": attempt + 1,
+                "status": r.status_code,
+                "response": r.text[:500]
+            })
 
             if r.status_code == 200:
                 return r.json()
             if r.status_code == 503:
-                wait = 20 * (attempt + 1)  # 20, 40, 60, 80...
-                print(f"[HF] Cold start, wait {wait}s")
-                sys.stdout.flush()
+                wait = 20 * (attempt + 1)
                 time.sleep(wait)
             else:
-                # Give it more chances
                 time.sleep(15)
         except Exception as e:
-            print(f"[HF] Error: {e}")
-            sys.stdout.flush()
+            add_debug({"event": "hf_error", "attempt": attempt + 1, "error": str(e)})
             time.sleep(10)
 
+    add_debug({"event": "hf_failed", "model": model_url})
     return None
 
 def top_result(results):
@@ -116,18 +133,16 @@ def is_fake(label):
     return any(w in label for w in ('fake', 'spoof', 'deepfake', 'synthetic', 'generated'))
 
 def fetch_media(url):
-    print(f"[MEDIA] Downloading...")
-    sys.stdout.flush()
+    add_debug({"event": "media_download", "url": url})
     r = requests.get(url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), timeout=30)
     r.raise_for_status()
-    print(f"[MEDIA] Got {len(r.content)} bytes")
-    sys.stdout.flush()
+    add_debug({"event": "media_downloaded", "size": len(r.content)})
     return r.content
 
 # ── Twilio Send ───────────────────────────────────────────────────
 def send_whatsapp(to, body):
     if not twilio_client:
-        print("[TWILIO] No client!")
+        add_debug({"event": "twilio_error", "error": "No client configured"})
         return False
     try:
         phone = to.replace('whatsapp:', '')
@@ -138,12 +153,10 @@ def send_whatsapp(to, body):
             body=body,
             to=phone
         )
-        print(f"[TWILIO] Sent! {msg.sid}")
-        sys.stdout.flush()
+        add_debug({"event": "twilio_sent", "sid": msg.sid, "to": phone})
         return True
     except Exception as e:
-        print(f"[TWILIO] Failed: {e}")
-        sys.stdout.flush()
+        add_debug({"event": "twilio_send_error", "error": str(e)})
         return False
 
 # ── Templates ─────────────────────────────────────────────────────
@@ -204,15 +217,14 @@ def run_analysis(sender, media_url, content_type):
     """Background thread: download, analyze, send result."""
     global active_threads
     thread_name = threading.current_thread().name
-    print(f"[{thread_name}] Started for {sender}")
-    sys.stdout.flush()
+    add_debug({"event": "thread_start", "thread": thread_name, "sender": sender, "type": content_type})
 
     try:
         # Download
         try:
             data = fetch_media(media_url)
         except Exception as e:
-            print(f"[{thread_name}] Download failed: {e}")
+            add_debug({"event": "media_error", "error": str(e), "thread": thread_name})
             send_whatsapp(sender, ERROR_MSG)
             return
 
@@ -222,42 +234,46 @@ def run_analysis(sender, media_url, content_type):
         elif content_type.startswith('audio/'):
             model_url, reply_fn = VOICE_MODEL, voice_reply
         else:
+            add_debug({"event": "unknown_type", "content_type": content_type})
             send_whatsapp(sender, UNKNOWN)
             return
 
-        # HF Inference with extended retries
+        # HF Inference
         results = hf_query(model_url, data)
         label, conf = top_result(results)
+
+        add_debug({
+            "event": "analysis_result",
+            "thread": thread_name,
+            "label": label,
+            "conf": conf,
+            "raw_results": str(results)[:500] if results else None
+        })
 
         if label:
             reply_text = reply_fn(label, conf, left_today(sender))
         else:
             reply_text = ERROR_MSG
 
-        send_whatsapp(sender, reply_text)
-        print(f"[{thread_name}] Done!")
-        sys.stdout.flush()
+        sent = send_whatsapp(sender, reply_text)
+        add_debug({"event": "thread_done", "thread": thread_name, "sent": sent})
 
     except Exception as e:
-        print(f"[{thread_name}] Error: {e}")
-        sys.stdout.flush()
+        add_debug({"event": "thread_error", "thread": thread_name, "error": str(e)})
         send_whatsapp(sender, ERROR_MSG)
     finally:
         active_threads.pop(thread_name, None)
 
-# ── Keep-Alive (pings itself to stay warm) ────────────────────────
+# ── Keep-Alive ────────────────────────────────────────────────────
 def keep_alive():
-    """Ping the service every 10 minutes to prevent Render from spinning down."""
     while True:
         try:
-            time.sleep(600)  # 10 minutes
+            time.sleep(600)
             url = os.environ.get('RENDER_EXTERNAL_URL', 'https://trustguard-sa.onrender.com')
             requests.get(f"{url}/", timeout=10)
-            print("[KEEPALIVE] Pinged self")
         except:
             pass
 
-# Start keep-alive thread
 ka_thread = threading.Thread(target=keep_alive, daemon=True, name="keepalive")
 ka_thread.start()
 
@@ -268,6 +284,24 @@ def home():
     return (f"🛡️ TrustGuard SA Backend is live!\n"
             f"Active threads: {threads}"), 200
 
+@app.route('/debug', methods=['GET'])
+def debug():
+    """Debug endpoint: shows recent debug logs."""
+    with debug_lock:
+        logs = list(debug_logs)
+    # Also try to read from file
+    file_logs = []
+    try:
+        with open('/tmp/trustguard_debug.json', 'r') as f:
+            for line in f:
+                try:
+                    file_logs.append(json.loads(line.strip()))
+                except:
+                    pass
+    except:
+        pass
+    return json.dumps({"memory_logs": logs, "file_logs": file_logs[-30:]}, indent=2, default=str), 200
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     global seen_users, active_threads
@@ -275,6 +309,8 @@ def webhook():
     sender    = request.form.get('From', '')
     body      = request.form.get('Body', '').strip().lower()
     num_media = int(request.form.get('NumMedia', 0))
+
+    add_debug({"event": "webhook", "sender": sender, "body": body, "num_media": num_media})
 
     reply = UNKNOWN
 
@@ -293,13 +329,12 @@ def webhook():
             media_type = 'image' if content_type.startswith('image/') else 'audio'
             reply = ANALYZING_IMAGE if media_type == 'image' else ANALYZING_VOICE
 
-            # Launch background thread (daemon=False to keep alive after request)
             thread_name = f"worker_{sender.replace('+','')}_{int(time.time())}"
             t = threading.Thread(
                 target=run_analysis,
                 args=(sender, media_url, content_type),
                 name=thread_name,
-                daemon=False  # Non-daemon: thread keeps running after request ends
+                daemon=False
             )
             active_threads[thread_name] = t
             t.start()
@@ -318,6 +353,5 @@ def webhook():
 # ── Run ───────────────────────────────────────────────────────────
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    print(f"[STARTUP] TrustGuard SA starting on port {port}")
-    sys.stdout.flush()
+    add_debug({"event": "startup", "port": port})
     app.run(host='0.0.0.0', port=port, debug=False)
