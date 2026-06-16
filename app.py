@@ -302,6 +302,44 @@ def debug():
         pass
     return json.dumps({"memory_logs": logs, "file_logs": file_logs[-30:]}, indent=2, default=str), 200
 
+@app.route('/test', methods=['GET'])
+def test_connectivity():
+    """Test outbound connectivity from the Render server."""
+    import socket
+    results = {}
+
+    # Test DNS resolution
+    for host in ['google.com', 'huggingface.co', 'api-inference.huggingface.co', 'httpbin.org']:
+        try:
+            ip = socket.gethostbyname(host)
+            results[f'dns_{host}'] = f'OK ({ip})'
+        except Exception as e:
+            results[f'dns_{host}'] = f'FAIL: {e}'
+
+    # Test HTTP connectivity
+    for name, url in [
+        ('google', 'https://www.google.com'),
+        ('hf', 'https://huggingface.co'),
+        ('hf_api', 'https://api-inference.huggingface.co'),
+        ('httpbin', 'https://httpbin.org/get'),
+    ]:
+        try:
+            r = requests.get(url, timeout=10)
+            results[f'http_{name}'] = f'OK ({r.status_code})'
+        except Exception as e:
+            results[f'http_{name}'] = f'FAIL: {e}'
+
+    # Test if HF token is set
+    results['hf_token_set'] = bool(HF_TOKEN)
+    results['hf_token_prefix'] = HF_TOKEN[:10] + '...' if HF_TOKEN else 'NOT SET'
+
+    # Test Twilio credentials
+    results['twilio_sid_set'] = bool(TWILIO_ACCOUNT_SID)
+    results['twilio_token_set'] = bool(TWILIO_AUTH_TOKEN)
+    results['twilio_phone'] = TWILIO_PHONE
+
+    return json.dumps(results, indent=2), 200
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     global seen_users, active_threads
