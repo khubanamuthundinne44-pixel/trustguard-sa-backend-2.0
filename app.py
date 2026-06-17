@@ -26,8 +26,11 @@ HF_TOKEN           = os.environ.get('HF_TOKEN')
 TWILIO_PHONE       = os.environ.get('TWILIO_PHONE', '+155****3201')
 
 # ── Hugging Face AI Models ────────────────────────────────────────
-IMAGE_MODEL = "https://api-inference.huggingface.co/models/dima806/deepfake_vs_real_image_detection"
-VOICE_MODEL = "https://api-inference.huggingface.co/models/garystafford/wav2vec2-deepfake-voice-detector"
+# Use router.huggingface.co instead of api-inference.huggingface.co
+# because api-inference.huggingface.co has no public DNS records
+# and cannot be resolved from Render's network
+IMAGE_MODEL = "https://router.huggingface.co/hf-inference/models/dima806/deepfake_vs_real_image_detection"
+VOICE_MODEL = "https://router.huggingface.co/hf-inference/models/garystafford/wav2vec2-deepfake-voice-detector"
 
 # ── Settings ──────────────────────────────────────────────────────
 DAILY_LIMIT = 3
@@ -89,15 +92,39 @@ def left_today(phone):
     return max(0, DAILY_LIMIT - u['count'])
 
 # ── HF Inference ──────────────────────────────────────────────────
-def hf_query(model_url, data):
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    add_debug({"event": "hf_start", "model": model_url})
+def hf_query(model_url, data, task="image-classification"):
+    """Query HuggingFace Inference API via router.huggingface.co"""
+    from huggingface_hub import InferenceClient
 
-    for attempt in range(10):
+    # Extract model name from URL
+    model_name = model_url.split('/models/')[-1]
+
+    add_debug({"event": "hf_start", "model": model_name, "task": task})
+
+    try:
+        client = InferenceClient(model=model_name, token=HF_TOKEN)
+        # Call the right method based on task type
+        if task == "audio-classification":
+            result = client.audio_classification(data)
+        else:
+            result = client.image_classification(data)
+        add_debug({"event": "hf_result", "result": str(result)[:500]})
+        return result
+    except Exception as e:
+        add_debug({"event": "hf_error", "error": str(e)})
+        # Fallback to raw requests
+        return hf_query_fallback(model_url, data)
+
+def hf_query_fallback(model_url, data):
+    """Fallback: raw requests to router.huggingface.co"""
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    add_debug({"event": "hf_fallback_start", "url": model_url})
+
+    for attempt in range(5):
         try:
             r = requests.post(model_url, headers=headers, data=data, timeout=120)
             add_debug({
-                "event": "hf_attempt",
+                "event": "hf_fallback_attempt",
                 "attempt": attempt + 1,
                 "status": r.status_code,
                 "response": r.text[:500]
@@ -108,13 +135,16 @@ def hf_query(model_url, data):
             if r.status_code == 503:
                 wait = 20 * (attempt + 1)
                 time.sleep(wait)
+            elif r.status_code == 401:
+                add_debug({"event": "hf_auth_error"})
+                return None
             else:
                 time.sleep(15)
         except Exception as e:
-            add_debug({"event": "hf_error", "attempt": attempt + 1, "error": str(e)})
+            add_debug({"event": "hf_fallback_error", "attempt": attempt + 1, "error": str(e)})
             time.sleep(10)
 
-    add_debug({"event": "hf_failed", "model": model_url})
+    add_debug({"event": "hf_fallback_failed"})
     return None
 
 def top_result(results):
@@ -230,16 +260,16 @@ def run_analysis(sender, media_url, content_type):
 
         # Pick model
         if content_type.startswith('image/'):
-            model_url, reply_fn = IMAGE_MODEL, image_reply
+            model_url, reply_fn, task = IMAGE_MODEL, image_reply, "image-classification"
         elif content_type.startswith('audio/'):
-            model_url, reply_fn = VOICE_MODEL, voice_reply
+            model_url, reply_fn, task = VOICE_MODEL, voice_reply, "audio-classification"
         else:
             add_debug({"event": "unknown_type", "content_type": content_type})
             send_whatsapp(sender, UNKNOWN)
             return
 
         # HF Inference
-        results = hf_query(model_url, data)
+        results = hf_query(model_url, data, task=task)
         label, conf = top_result(results)
 
         add_debug({
