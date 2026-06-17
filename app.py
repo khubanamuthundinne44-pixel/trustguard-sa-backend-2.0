@@ -94,37 +94,22 @@ def left_today(phone):
 # ── HF Inference ──────────────────────────────────────────────────
 def hf_query(model_url, data, task="image-classification"):
     """Query HuggingFace Inference API via router.huggingface.co"""
-    from huggingface_hub import InferenceClient
-
-    # Extract model name from URL
     model_name = model_url.split('/models/')[-1]
-
     add_debug({"event": "hf_start", "model": model_name, "task": task})
 
-    try:
-        client = InferenceClient(model=model_name, token=HF_TOKEN)
-        # Call the right method based on task type
-        if task == "audio-classification":
-            result = client.audio_classification(data)
-        else:
-            result = client.image_classification(data)
-        add_debug({"event": "hf_result", "result": str(result)[:500]})
-        return result
-    except Exception as e:
-        add_debug({"event": "hf_error", "error": str(e)})
-        # Fallback to raw requests
-        return hf_query_fallback(model_url, data)
-
-def hf_query_fallback(model_url, data):
-    """Fallback: raw requests to router.huggingface.co"""
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    add_debug({"event": "hf_fallback_start", "url": model_url})
+    # Try raw requests first with proper content-type header
+    # (InferenceClient sometimes fails with content-type issues on router)
+    content_type = "audio/wav" if task == "audio-classification" else "image/png"
+    headers = {
+        "Authorization": f"Bearer {HF_TOKEN}",
+        "Content-Type": content_type
+    }
 
     for attempt in range(5):
         try:
             r = requests.post(model_url, headers=headers, data=data, timeout=120)
             add_debug({
-                "event": "hf_fallback_attempt",
+                "event": "hf_attempt",
                 "attempt": attempt + 1,
                 "status": r.status_code,
                 "response": r.text[:500]
@@ -133,7 +118,11 @@ def hf_query_fallback(model_url, data):
             if r.status_code == 200:
                 return r.json()
             if r.status_code == 503:
-                wait = 20 * (attempt + 1)
+                # Model is loading, wait and retry
+                result = r.json() if r.text else {}
+                estimated = result.get('estimated_time', 30)
+                wait = min(estimated + 5, 120)
+                add_debug({"event": "hf_cold_start", "wait": wait})
                 time.sleep(wait)
             elif r.status_code == 401:
                 add_debug({"event": "hf_auth_error"})
@@ -141,11 +130,12 @@ def hf_query_fallback(model_url, data):
             else:
                 time.sleep(15)
         except Exception as e:
-            add_debug({"event": "hf_fallback_error", "attempt": attempt + 1, "error": str(e)})
+            add_debug({"event": "hf_error", "attempt": attempt + 1, "error": str(e)})
             time.sleep(10)
 
-    add_debug({"event": "hf_fallback_failed"})
+    add_debug({"event": "hf_all_failed"})
     return None
+
 
 def top_result(results):
     if not isinstance(results, list) or not results:
